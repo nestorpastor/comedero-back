@@ -51,6 +51,31 @@ despierta), pero si en algún momento esto pasa a ser algo que la gente
 usa todos los días, conviene pasar a un plan pago (no se duerme) o a
 otro proveedor (Railway/Fly.io tienen planes similares).
 
+## Avisos al celular (ntfy.sh)
+
+El relay manda una notificación "Comedero offline" cuando una Pi pasa
+más de 2 minutos sin conexión, y "Comedero online" cuando vuelve (solo
+al cambiar de estado; un corte de unos segundos no avisa nada).
+
+1. Instalá la app **ntfy** en el iPhone y suscribite a un tema con un
+   nombre difícil de adivinar (cualquiera que sepa el nombre puede leer
+   los avisos), por ejemplo `comedero-k7f2m9x4`.
+2. En Render → tu servicio → **Environment**, agregá la variable
+   `NTFY_TOPIC` con ese mismo nombre y guardá (Render redespliega solo).
+
+Si `NTFY_TOPIC` no está definida, el relay funciona igual pero sin
+avisos. Opcionales: `OFFLINE_TRAS_SEGUNDOS` (por defecto 120) y
+`NTFY_URL` (por defecto `https://ntfy.sh`, por si usás un servidor ntfy
+propio).
+
+Limitación: el estado vive en memoria, así que si el relay se reinicia
+mientras la Pi está apagada, no se entera de que existía y no avisa
+hasta que la Pi vuelva a conectarse. Además, el relay tiene que estar
+despierto para medir los 2 minutos (en el plan gratis, un monitor tipo
+UptimeRobot evita que se duerma).
+
+Para probarlo sin mandar nada a ntfy.sh: `python3 test_avisos.py`.
+
 ## Cómo se conecta cada lado
 
 - **La Pi**: usa `cloud_relay.py` (en el proyecto `comedero_mascotas/`).

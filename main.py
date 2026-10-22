@@ -26,18 +26,28 @@ para que sea multi-tenant de verdad.
 """
 
 import asyncio
+import os
 import secrets
 import string
 import time
+import urllib.request
+from contextlib import asynccontextmanager
 from typing import Dict, Optional
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
-app = FastAPI(title="Comedero Relay")
-
 CODIGO_TTL_SEGUNDOS = 10 * 60
 COMANDO_TIMEOUT_SEGUNDOS = 15
+
+# Avisos por ntfy.sh: si la Pi pasa más de OFFLINE_TRAS_SEGUNDOS sin el
+# WebSocket conectado, mandamos "Comedero offline"; cuando vuelve,
+# "Comedero online". Solo al cambiar de estado, no en cada chequeo. Si
+# NTFY_TOPIC no está definida, no se manda nada.
+NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()
+NTFY_URL = os.environ.get("NTFY_URL", "https://ntfy.sh").rstrip("/")
+OFFLINE_TRAS_SEGUNDOS = float(os.environ.get("OFFLINE_TRAS_SEGUNDOS", 2 * 60))
+CHEQUEO_CADA_SEGUNDOS = float(os.environ.get("CHEQUEO_CADA_SEGUNDOS", 15))
 
 
 class Dispositivo:
@@ -48,12 +58,72 @@ class Dispositivo:
         self.websocket: Optional[WebSocket] = None
         self.codigo_actual: Optional[str] = None
         self.codigo_expira: float = 0.0
+        # Momento en que se cortó el WebSocket (None mientras está
+        # conectado o si nunca se conectó desde que arrancó el relay).
+        self.desconectado_desde: Optional[float] = None
+        self.avisado_offline = False
 
 
 # Estado en memoria -- device_id -> Dispositivo
 DISPOSITIVOS: Dict[str, Dispositivo] = {}
 # request_id -> Future, para casar la respuesta de la Pi con el pedido HTTP
 PEDIDOS_PENDIENTES: Dict[str, "asyncio.Future"] = {}
+
+
+def _enviar_ntfy_sync(titulo: str, mensaje: str, tags: str):
+    req = urllib.request.Request(
+        f"{NTFY_URL}/{NTFY_TOPIC}",
+        data=mensaje.encode("utf-8"),
+        headers={"Title": titulo, "Tags": tags},
+        method="POST",
+    )
+    urllib.request.urlopen(req, timeout=10).close()
+
+
+async def avisar_ntfy(titulo: str, mensaje: str, tags: str = ""):
+    """Manda una notificación a ntfy. Nunca levanta excepción: si ntfy
+    falla, el relay tiene que seguir funcionando igual."""
+    if not NTFY_TOPIC:
+        return
+    try:
+        await asyncio.to_thread(_enviar_ntfy_sync, titulo, mensaje, tags)
+    except Exception as e:
+        print(f"No se pudo avisar por ntfy ({e})")
+
+
+# Referencias a las tareas de aviso en curso (asyncio solo guarda una
+# referencia débil y sin esto podrían cancelarse a mitad de camino).
+_TAREAS_AVISO: set = set()
+
+
+async def _vigilar_dispositivos():
+    while True:
+        await asyncio.sleep(CHEQUEO_CADA_SEGUNDOS)
+        ahora = time.time()
+        for disp in list(DISPOSITIVOS.values()):
+            if (
+                disp.websocket is None
+                and disp.desconectado_desde is not None
+                and not disp.avisado_offline
+                and ahora - disp.desconectado_desde >= OFFLINE_TRAS_SEGUNDOS
+            ):
+                disp.avisado_offline = True
+                minutos = int((ahora - disp.desconectado_desde) // 60)
+                await avisar_ntfy(
+                    "Comedero offline",
+                    f"{disp.device_id} lleva {minutos} min sin conexión con el relay.",
+                    "warning",
+                )
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    tarea = asyncio.create_task(_vigilar_dispositivos())
+    yield
+    tarea.cancel()
+
+
+app = FastAPI(title="Comedero Relay", lifespan=lifespan)
 
 
 def _generar_codigo(largo=6) -> str:
@@ -177,6 +247,18 @@ async def ws_dispositivo(websocket: WebSocket, device_id: str, device_secret: st
 
     await websocket.accept()
     disp.websocket = websocket
+    disp.desconectado_desde = None
+    if disp.avisado_offline:
+        disp.avisado_offline = False
+        # En una tarea aparte para no demorar los comandos que lleguen
+        # justo al reconectar mientras esperamos a ntfy.
+        tarea = asyncio.create_task(avisar_ntfy(
+            "Comedero online",
+            f"{disp.device_id} volvió a conectarse.",
+            "white_check_mark",
+        ))
+        _TAREAS_AVISO.add(tarea)
+        tarea.add_done_callback(_TAREAS_AVISO.discard)
     try:
         while True:
             mensaje = await websocket.receive_json()
@@ -192,6 +274,7 @@ async def ws_dispositivo(websocket: WebSocket, device_id: str, device_secret: st
     finally:
         if disp.websocket is websocket:
             disp.websocket = None
+            disp.desconectado_desde = time.time()
 
 
 @app.get("/")
