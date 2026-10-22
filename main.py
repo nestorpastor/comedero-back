@@ -49,6 +49,8 @@ NTFY_URL = os.environ.get("NTFY_URL", "https://ntfy.sh").rstrip("/")
 OFFLINE_TRAS_SEGUNDOS = float(os.environ.get("OFFLINE_TRAS_SEGUNDOS", 2 * 60))
 CHEQUEO_CADA_SEGUNDOS = float(os.environ.get("CHEQUEO_CADA_SEGUNDOS", 15))
 
+INICIO_RELAY = time.time()
+
 
 class Dispositivo:
     def __init__(self, device_id: str, secreto: str):
@@ -197,10 +199,25 @@ async def emparejar(body: PairIn):
 
 @app.get("/devices/{device_id}/status")
 def estado_dispositivo(device_id: str):
+    """La app lo consulta para mostrar el cartel de "Comedero offline".
+    offline = más de OFFLINE_TRAS_SEGUNDOS sin conexión; desconectado_desde
+    en epoch (segundos)."""
     disp = DISPOSITIVOS.get(device_id)
     if disp is None:
-        raise HTTPException(404, "Dispositivo no encontrado")
-    return {"emparejado": disp.emparejado, "conectado": disp.websocket is not None}
+        # Si el relay se reinició y la Pi todavía no volvió a conectarse,
+        # no la conocemos: la damos por desconectada desde el arranque.
+        desde: Optional[float] = INICIO_RELAY
+        emparejado = conectado = False
+    else:
+        conectado = disp.websocket is not None
+        desde = None if conectado else (disp.desconectado_desde or INICIO_RELAY)
+        emparejado = disp.emparejado
+    return {
+        "emparejado": emparejado,
+        "conectado": conectado,
+        "offline": desde is not None and time.time() - desde >= OFFLINE_TRAS_SEGUNDOS,
+        "desconectado_desde": desde,
+    }
 
 
 class ComandoIn(BaseModel):

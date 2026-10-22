@@ -79,10 +79,17 @@ async def main():
     assert titulos() == [], titulos()
     print("✔ microcorte sin avisos")
 
+    async with httpx.AsyncClient() as client:
+        estado = (await client.get(f"{BASE}/devices/{DEVICE_ID}/status")).json()
+    assert estado["conectado"] and not estado["offline"], estado
+
     # Corte largo -> "Comedero offline", una sola vez.
     await ws.close()
     await asyncio.sleep(6)
     assert titulos() == ["Comedero offline"], titulos()
+    async with httpx.AsyncClient() as client:
+        estado = (await client.get(f"{BASE}/devices/{DEVICE_ID}/status")).json()
+    assert estado["offline"] and estado["desconectado_desde"], estado
     assert RECIBIDOS[0][0] == "/topic-de-prueba", RECIBIDOS[0]
     print("✔ aviso offline:", RECIBIDOS[0][2])
 
