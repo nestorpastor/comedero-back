@@ -39,6 +39,7 @@ from pydantic import BaseModel
 
 CODIGO_TTL_SEGUNDOS = 10 * 60
 COMANDO_TIMEOUT_SEGUNDOS = 15
+PING_TIMEOUT_SEGUNDOS = 5
 
 # Avisos por ntfy.sh: si la Pi pasa más de OFFLINE_TRAS_SEGUNDOS sin el
 # WebSocket conectado, mandamos "Comedero offline"; cuando vuelve,
@@ -223,6 +224,21 @@ def estado_dispositivo(device_id: str):
 class ComandoIn(BaseModel):
     accion: str
     duracion: Optional[float] = None
+    n: Optional[int] = None  # cantidad de registros, para accion=historial
+
+
+async def _pedir_a_la_pi(disp: Dispositivo, mensaje: dict, timeout: float) -> dict:
+    """Le manda un comando a la Pi por su WebSocket y espera la respuesta."""
+    request_id = secrets.token_hex(8)
+    futuro = asyncio.get_event_loop().create_future()
+    PEDIDOS_PENDIENTES[request_id] = futuro
+    try:
+        await disp.websocket.send_json({"type": "command", "request_id": request_id, **mensaje})
+        return await asyncio.wait_for(futuro, timeout=timeout)
+    except asyncio.TimeoutError:
+        raise HTTPException(504, "La Raspberry no respondió a tiempo")
+    finally:
+        PEDIDOS_PENDIENTES.pop(request_id, None)
 
 
 @app.post("/devices/{device_id}/command")
@@ -235,24 +251,49 @@ async def enviar_comando(device_id: str, body: ComandoIn):
     if disp.websocket is None:
         raise HTTPException(503, "La Raspberry no está conectada ahora mismo")
 
-    request_id = secrets.token_hex(8)
-    loop = asyncio.get_event_loop()
-    futuro = loop.create_future()
-    PEDIDOS_PENDIENTES[request_id] = futuro
-
-    mensaje = {"type": "command", "request_id": request_id, "accion": body.accion}
+    mensaje = {"accion": body.accion}
     if body.duracion is not None:
         mensaje["duracion"] = body.duracion
+    if body.n is not None:
+        mensaje["n"] = body.n
+    return await _pedir_a_la_pi(disp, mensaje, COMANDO_TIMEOUT_SEGUNDOS)
 
+
+@app.get("/devices/{device_id}/ping")
+async def ping_dispositivo(device_id: str):
+    """Chequeo de punta a punta: el pedido viaja hasta la Pi y vuelve. La
+    app lo usa al abrirse para mostrar el cartel de "sin conexión" sin
+    esperar a que el relay note que el WebSocket se cortó (si la Pi se
+    apaga de golpe, la conexión puede quedar colgada un buen rato)."""
+    disp = DISPOSITIVOS.get(device_id)
+    if disp is None:
+        raise HTTPException(404, "La Raspberry no se conectó desde que arrancó el relay")
+    ws = disp.websocket
+    if ws is None:
+        raise HTTPException(503, "La Raspberry no está conectada ahora mismo")
+
+    inicio = time.time()
     try:
-        await disp.websocket.send_json(mensaje)
-        resultado = await asyncio.wait_for(futuro, timeout=COMANDO_TIMEOUT_SEGUNDOS)
-    except asyncio.TimeoutError:
-        raise HTTPException(504, "La Raspberry no respondió a tiempo")
-    finally:
-        PEDIDOS_PENDIENTES.pop(request_id, None)
+        await _pedir_a_la_pi(disp, {"accion": "ping"}, PING_TIMEOUT_SEGUNDOS)
+    except HTTPException:
+        # No contestó: damos esa conexión por muerta, así el estado y el
+        # aviso de ntfy cuentan desde ahora. Si la Pi sigue viva, reconecta
+        # sola en unos segundos.
+        if disp.websocket is ws:
+            disp.websocket = None
+            disp.desconectado_desde = time.time()
+            tarea = asyncio.create_task(_cerrar_sin_esperar(ws))
+            _TAREAS_AVISO.add(tarea)
+            tarea.add_done_callback(_TAREAS_AVISO.discard)
+        raise
+    return {"ok": True, "latencia_ms": int((time.time() - inicio) * 1000)}
 
-    return resultado
+
+async def _cerrar_sin_esperar(ws: WebSocket):
+    try:
+        await asyncio.wait_for(ws.close(), timeout=5)
+    except Exception:
+        pass
 
 
 @app.websocket("/devices/{device_id}/ws")
