@@ -7,9 +7,9 @@ esté cada uno.
 
 Es un prototipo: guarda todo en memoria (device_id, secretos, códigos de
 emparejamiento) — si el servicio se reinicia, las Pis se vuelven a
-registrar solas (no hace falta hacer nada), pero un dispositivo que
-estaba emparejado va a tener que volver a vincularse escaneando un QR
-nuevo. Para producción de verdad, el siguiente paso natural es sumar una
+registrar solas (no hace falta hacer nada), y cada Pi le avisa si ya
+estaba vinculada (lo guarda en su `device_id.json`), así que tampoco hace
+falta volver a escanear el QR. Para producción de verdad, el siguiente paso natural es sumar una
 base de datos (Postgres) y cuentas de usuario.
 
 ## Probarlo en tu computadora
@@ -40,8 +40,8 @@ buena forma de confirmar que todo funciona antes de desplegarlo.
    - **Instance Type**: Free.
 5. Creá el servicio. Al terminar el deploy te da una URL pública fija,
    algo como `https://comedero-relay.onrender.com` — **esa es la URL que
-   vas a cargar** en `config.json` de la Raspberry (`relay_url`) y en
-   Ajustes de la app (URL del backend).
+   vas a cargar** en `config.json` de la Raspberry (`relay_url`). La app
+   no la necesita: la Pi la incluye en el QR de vinculación.
 
 **Importante sobre el plan gratis de Render:** el servicio se "duerme"
 después de unos 15 minutos sin tráfico, y tarda unos segundos en
@@ -87,10 +87,10 @@ Para probarlo sin mandar nada a ntfy.sh: `python3 test_avisos.py`.
   Al arrancar la app, un botón nuevo "Vincular app" en el encabezado
   muestra el QR para emparejar.
 
-- **La app del celular**: en Ajustes, sección "Modo nube", cargá la
-  misma URL del backend y tocá "Escanear QR para vincular". Después de
-  escanear, la app usa este backend para todo (ya no hace falta la IP
-  local ni Tailscale).
+- **La app del celular**: tocá "Vincular comedero" y escaneá el QR. El
+  QR trae la URL de este backend, así que no hay que escribir nada.
+  Después de escanear, la app usa este backend para todo (ya no hace
+  falta la IP local ni Tailscale).
 
 ## Escalar a "muchos usuarios" de verdad
 

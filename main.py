@@ -141,6 +141,10 @@ class RegistroIn(BaseModel):
     device_id: str
     device_secret: str
     nombre: Optional[str] = None
+    # La Pi recuerda si ya la vincularon (en su device_id.json) y lo manda
+    # en cada registro: así, si el relay se reinicia y pierde la memoria,
+    # recupera la vinculación sin tener que volver a escanear el QR.
+    emparejado: bool = False
 
 
 @app.post("/devices/register")
@@ -149,7 +153,10 @@ def registrar_dispositivo(body: RegistroIn):
     if existente is not None and existente.secreto != body.device_secret:
         raise HTTPException(403, "device_id ya registrado con otro secreto")
     if existente is None:
-        DISPOSITIVOS[body.device_id] = Dispositivo(body.device_id, body.device_secret)
+        existente = DISPOSITIVOS[body.device_id] = Dispositivo(body.device_id, body.device_secret)
+    if body.emparejado:
+        # Confiable: el pedido trae el secreto que solo tiene esa Pi.
+        existente.emparejado = True
     return {"ok": True}
 
 
