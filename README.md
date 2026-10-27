@@ -76,6 +76,25 @@ UptimeRobot evita que se duerma).
 
 Para probarlo sin mandar nada a ntfy.sh: `python3 test_avisos.py`.
 
+## Actualizaciones del ejecutable de la Pi
+
+La Pi corre un ejecutable que GitHub Actions compila y firma en cada push
+a `main` del repo `comedero_raspberry`, y lo publica como release. La Pi
+no habla con GitHub: le pregunta a este relay (autenticada con su
+`device_secret`):
+
+- `GET /devices/{id}/actualizacion`: manifiesto de la última versión y su
+  firma (la Pi la verifica; el relay solo la reenvía).
+- `GET /devices/{id}/actualizacion/ejecutable?numero=N`: redirige a la
+  descarga temporal de GitHub, así el archivo no pasa por Render.
+
+Variables de entorno en Render:
+- `GITHUB_TOKEN_ACTUALIZACIONES`: token de GitHub de solo lectura
+  (Fine-grained, **Contents: Read-only** sobre `comedero_raspberry`).
+  Sin esta variable, las actualizaciones quedan desactivadas.
+- `REPO_ACTUALIZACIONES` (opcional): por defecto
+  `nestorpastor/comedero_raspberry`.
+
 ## Cómo se conecta cada lado
 
 - **La Pi**: usa `cloud_relay.py` (en el proyecto `comedero_mascotas/`).

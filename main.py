@@ -26,15 +26,19 @@ para que sea multi-tenant de verdad.
 """
 
 import asyncio
+import base64
+import json
 import os
 import secrets
 import string
 import time
+import urllib.error
 import urllib.request
 from contextlib import asynccontextmanager
 from typing import Dict, Optional
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 CODIGO_TTL_SEGUNDOS = 10 * 60
@@ -340,6 +344,102 @@ async def ws_dispositivo(websocket: WebSocket, device_id: str, device_secret: st
         if disp.websocket is websocket:
             disp.websocket = None
             disp.desconectado_desde = time.time()
+
+
+# ---- Actualizaciones del ejecutable de la Pi ----
+# GitHub Actions compila cada versión del repo de la Pi y la publica como
+# release (ejecutable + manifest.json + manifest.sig). La Pi no habla con
+# GitHub: le pide la versión a este relay con su device_secret, y el relay
+# la consulta con un token de solo lectura que vive en las variables de
+# entorno de Render. La firma la verifica la Pi: el relay solo la reenvía.
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN_ACTUALIZACIONES", "").strip()
+REPO_ACTUALIZACIONES = os.environ.get("REPO_ACTUALIZACIONES", "nestorpastor/comedero_raspberry")
+GITHUB_API = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
+CACHE_RELEASE_SEGUNDOS = 300
+_cache_release: dict = {"hasta": 0.0, "datos": None}
+
+
+class _SinRedirecciones(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def _github(ruta_o_url: str, binario: bool = False, seguir: bool = True):
+    url = ruta_o_url if ruta_o_url.startswith("http") else f"{GITHUB_API}{ruta_o_url}"
+    req = urllib.request.Request(url)
+    req.add_header("Accept", "application/octet-stream" if binario else "application/vnd.github+json")
+    # "unredirected": si GitHub redirige a su almacenamiento, el token no
+    # tiene que viajar (y el almacenamiento rechaza el pedido si lo lleva).
+    req.add_unredirected_header("Authorization", f"Bearer {GITHUB_TOKEN}")
+    abridor = urllib.request.build_opener() if seguir else urllib.request.build_opener(_SinRedirecciones)
+    return abridor.open(req, timeout=30)
+
+
+def _ultima_version() -> Optional[dict]:
+    """Última release publicada (con caché de 5 min): numero, manifiesto y
+    firma en base64, e id del ejecutable. None si no hay ninguna."""
+    if time.time() < _cache_release["hasta"]:
+        return _cache_release["datos"]
+    try:
+        with _github(f"/repos/{REPO_ACTUALIZACIONES}/releases/latest") as r:
+            release = json.load(r)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            datos = None
+        else:
+            raise HTTPException(502, f"GitHub respondió {e.code}")
+    else:
+        assets = {a["name"]: a for a in release.get("assets", [])}
+        if not {"manifest.json", "manifest.sig", "comedero-aarch64"} <= assets.keys():
+            datos = None  # release a medio publicar
+        else:
+            with _github(assets["manifest.json"]["url"], binario=True) as r:
+                manifiesto = r.read()
+            with _github(assets["manifest.sig"]["url"], binario=True) as r:
+                firma = r.read()
+            datos = {
+                "numero": json.loads(manifiesto)["numero"],
+                "manifiesto": base64.b64encode(manifiesto).decode(),
+                "firma": base64.b64encode(firma).decode(),
+                "id_ejecutable": assets["comedero-aarch64"]["id"],
+            }
+    _cache_release.update(hasta=time.time() + CACHE_RELEASE_SEGUNDOS, datos=datos)
+    return datos
+
+
+@app.get("/devices/{device_id}/actualizacion")
+def ver_actualizacion(device_id: str, device_secret: str):
+    _autenticar(device_id, device_secret)
+    if not GITHUB_TOKEN:
+        raise HTTPException(503, "Las actualizaciones no están configuradas en el relay")
+    datos = _ultima_version()
+    if datos is None:
+        raise HTTPException(404, "Todavía no hay ninguna versión publicada")
+    return {"manifiesto": datos["manifiesto"], "firma": datos["firma"]}
+
+
+@app.get("/devices/{device_id}/actualizacion/ejecutable")
+def bajar_ejecutable(device_id: str, device_secret: str, numero: int):
+    _autenticar(device_id, device_secret)
+    if not GITHUB_TOKEN:
+        raise HTTPException(503, "Las actualizaciones no están configuradas en el relay")
+    datos = _ultima_version()
+    if datos is not None and datos["numero"] != numero:
+        _cache_release["hasta"] = 0.0  # puede que haya salido una más nueva
+        datos = _ultima_version()
+    if datos is None or datos["numero"] != numero:
+        raise HTTPException(409, "Esa versión ya no es la última publicada")
+    # GitHub contesta con una redirección a una URL firmada y temporal de
+    # su almacenamiento: se la pasamos a la Pi, que descarga directo de ahí
+    # (el ejecutable no pasa por Render).
+    url = f"{GITHUB_API}/repos/{REPO_ACTUALIZACIONES}/releases/assets/{datos['id_ejecutable']}"
+    try:
+        _github(url, binario=True, seguir=False).close()
+    except urllib.error.HTTPError as e:
+        if e.code in (301, 302, 303, 307, 308):
+            return RedirectResponse(e.headers["Location"], status_code=302)
+        raise HTTPException(502, f"GitHub respondió {e.code}")
+    raise HTTPException(502, "GitHub no devolvió la descarga")
 
 
 @app.get("/")
