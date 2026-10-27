@@ -37,7 +37,7 @@ import urllib.request
 from contextlib import asynccontextmanager
 from typing import Dict, Optional
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
@@ -407,9 +407,19 @@ def _ultima_version() -> Optional[dict]:
     return datos
 
 
+def _secreto(x_device_secret: Optional[str], device_secret: Optional[str]) -> str:
+    # La Pi lo manda en el encabezado X-Device-Secret: en la URL quedaría
+    # en los logs. Se acepta también por URL para versiones viejas.
+    secreto = x_device_secret or device_secret
+    if not secreto:
+        raise HTTPException(401, "Falta el secreto del dispositivo")
+    return secreto
+
+
 @app.get("/devices/{device_id}/actualizacion")
-def ver_actualizacion(device_id: str, device_secret: str):
-    _autenticar(device_id, device_secret)
+def ver_actualizacion(device_id: str, device_secret: Optional[str] = None,
+                      x_device_secret: Optional[str] = Header(None)):
+    _autenticar(device_id, _secreto(x_device_secret, device_secret))
     if not GITHUB_TOKEN:
         raise HTTPException(503, "Las actualizaciones no están configuradas en el relay")
     datos = _ultima_version()
@@ -419,8 +429,9 @@ def ver_actualizacion(device_id: str, device_secret: str):
 
 
 @app.get("/devices/{device_id}/actualizacion/ejecutable")
-def bajar_ejecutable(device_id: str, device_secret: str, numero: int):
-    _autenticar(device_id, device_secret)
+def bajar_ejecutable(device_id: str, numero: int, device_secret: Optional[str] = None,
+                     x_device_secret: Optional[str] = Header(None)):
+    _autenticar(device_id, _secreto(x_device_secret, device_secret))
     if not GITHUB_TOKEN:
         raise HTTPException(503, "Las actualizaciones no están configuradas en el relay")
     datos = _ultima_version()
